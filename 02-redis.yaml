@@ -1,0 +1,120 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-hl
+  namespace: redis
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: redis
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: 6379
+    protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-sts
+  namespace: redis
+spec:
+  replicas: 3
+  serviceName: redis-hl
+  minReadySeconds: 10
+  selector:
+    matchExpressions:
+    - key: app
+      operator: In
+      values: ["redis"]
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      serviceAccountName: redis-sa
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: redis
+              topologyKey: kubernetes.io/hostname
+      initContainers:
+      - name: init-redis-config
+        image: busybox:1.37.0-glibc
+        command:
+        - sh
+        - -c
+        - |
+          cp /tmp/raw-config.conf /config/redis.conf
+          ordinal="${HOSTNAME##*-}"
+          if [[ $ordinal != "0" ]]; then
+            echo "replicaof redis-sts-0.redis-hl.redis.svc.cluster.local 6379" >> /config/redis.conf
+          fi
+        imagePullPolicy: IfNotPresent
+        volumeMounts:
+        - name: raw-config
+          mountPath: /tmp/raw-config.conf
+          subPath: redis.conf
+        - name: config
+          mountPath: /config
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsUser: 1000
+          capabilities:
+            drop: ["ALL"]
+      containers:
+      - name: redis
+        image: redis:7.4.1
+        ports:
+        - name: redis
+          containerPort: 6379
+          protocol: TCP
+        command: ["redis-server", "/etc/redis/redis.conf"]
+        resources:
+          requests:
+            cpu: 40m
+            memory: 50M
+          limits:
+            cpu: 60m
+            memory: 100M
+        volumeMounts:
+        - name: config
+          mountPath: /etc/redis
+        - name: redis-data
+          mountPath: /data
+        readinessProbe:
+          exec:
+            command: ["sh", "-c", "redis-cli -p 6379 ping"]
+          initialDelaySeconds: 3
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsUser: 1000
+          capabilities:
+            drop: ["ALL"]
+      volumes:
+      - name: raw-config
+        configMap:
+          name: redis-cm
+      - name: config
+        emptyDir: {}
+  volumeClaimTemplates:
+  - metadata:
+      name: redis-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: standard
+      resources:
+        requests:
+          storage: 100M
